@@ -2,13 +2,18 @@
 
 ## What this repo is
 
-Phase 1 of FAVA: a **pass-through MCP reverse proxy** over Streamable HTTP.
-It relays JSON-RPC bytes unchanged and observes them via hooks. There is no
-authorization yet — that is what the hooks are reserved for.
+Phase 1 of FAVA: a **pass-through reverse proxy for the OpenAI-compatible Chat
+Completions API**, sitting between an agent harness and the LLM provider. It
+relays bytes unchanged and observes the model's tool-call intents via hooks.
+There is no authorization yet — that is what the hooks are reserved for.
 
 Background: [`README.md`](README.md) (usage, API, design rationale).
 Roadmap: [`docs/implementation_plan.md`](docs/implementation_plan.md).
 Paper: `docs/FAVA_ Formal Authorization for Verified Agents….html`.
+
+The MCP-wire proxy this replaces is preserved on the `master` branch. It is
+**superseded, not a reference**: it mediated only MCP-routed tools and was blind
+to a harness's local ones, which is the whole reason for this boundary.
 
 ## Build and Test
 
@@ -16,7 +21,7 @@ Always use `uv`. Never install Python packages globally.
 
 ```bash
 uv sync --group dev     # install/create .venv
-uv run pytest           # 38 tests, ~3.5s
+uv run pytest           # 92 tests, ~7s
 ```
 
 If a test run hangs, suspect the relay's task group, not pytest. Prefer a hard
@@ -26,60 +31,82 @@ cut so a hang costs 200s instead of forever:
 timeout -s KILL 200 uv run pytest -q --no-header
 ```
 
-`tests/test_forwarding_e2e.py` binds **real free TCP ports** and runs two
-uvicorn servers (`MCPServer` backend + proxy). Ports are allocated with a
-`bind(0)` probe, so tests are parallel-safe. Never hardcode ports.
+`tests/test_e2e.py` binds **real free TCP ports** and runs two uvicorn servers
+(fake provider + proxy), driven by a real `openai` client. Ports are allocated
+with a `bind(0)` probe, so tests are parallel-safe. Never hardcode ports.
+
+`tests/test_relay.py` drives the ASGI interface directly through an
+`httpx.MockTransport`. Do **not** reach for `httpx.ASGITransport` there: it
+buffers the whole response body before returning, so it cannot exercise the
+streaming path or a mid-stream upstream failure at all.
 
 ## Architecture
 
 The layering is load-bearing — respect the direction of dependencies:
 
 ```
-cli ──► app ──► relay ──► headers, messages, config
-                         │
-                         └──► hooks (observation only, read-only)
+cli ──► app ──► relay ──► headers, chat, config
+                       │
+                       └──► hooks (observation only, read-only)
 ```
 
 - **`relay.py` is the only module touching the wire.** Raw ASGI on purpose: a
   Starlette app would re-encode bodies and own headers, breaking byte fidelity.
   Do not introduce framework-level request/response objects here.
-- **`messages.py` parsing is strictly side-band.** It may never gate, mutate or
+- **`chat.py` parsing is strictly side-band.** It may never gate, mutate or
   reject traffic. A body that fails to parse is still forwarded verbatim, with
-  the failure recorded on `WireMessage.validation_error`.
+  the failure recorded on `validation_error`.
 - **`hooks.py` cannot alter traffic today.** Keep it that way until the
   authorizer exists; read-only hooks are why this is safe to deploy early.
 
 ## Conventions that differ from the obvious
 
-- **SDK v2, not v1.** `mcp` 2.2.0, protocol `2026-07-28`. v2 uses **`httpx2`**,
-  not `httpx`. `MCPServer` replaces `mcp.server.Server`; `request_ctx` is gone.
-  `CallToolResult.is_error` (v2), not `isError` (v1). Any snippet found online
-  for `mcp-proxy` 0.12.0 is v1-era and will not import.
-- **Two envelope eras, one parser.** 2025-era is stateful (`Mcp-Session-Id`,
-  `GET` SSE stream, `Last-Event-ID`). `2026-07-28` is stateless and mirrors
-  routing into `Mcp-Method` / `Mcp-Name` / `Mcp-Param-*` headers. Both carry
-  `method`/`params` in the JSON body, so handle both by parsing the body and
-  attaching the header mirror — never by branching on version.
-- **Handshake method varies.** A v2 client in default `auto` mode sends
-  **`server/discover`**, not `initialize`. `_NON_EFFECTFUL_METHODS` in
-  `hooks.py` must list both. Tests assert the intersection, not one name.
-- **Fail closed on the unknown.** `RequestContext.is_effectful` returns `True`
-  for unrecognized methods, unparseable bodies, and anything not in the
-  allowlist of reads. Never invert this default.
-- **The proxy owns no session.** `Mcp-Session-Id` is relayed untouched, so the
-  client's session is with the backend. Do not add session tracking keyed on
-  the HTTP connection — it must be keyed on the run, see the implementation plan.
+- **Tool-call intent lives in the *response*, not the request.** This inverts the
+  interception model of an MCP proxy, where the client's request carries the
+  invocation. Here the request carries *context* — conversation, declared tool
+  catalog, and the previous turn's tool **results** — while the model's intent
+  arrives from the provider. `on_response` is the authorization seam that will
+  grow an allow/block return value; `on_request` never will.
+- **Streaming fragments tool calls.** `function.arguments` arrives as a string
+  split across many SSE frames, identified only by `(choice index, tool call
+  index)`, and frames split across TCP chunk boundaries too. Parallel calls
+  interleave, so fragments must be keyed rather than appended in arrival order.
+  Accumulate incrementally while bytes stream past (`StreamAccumulator`) — never
+  parse a buffered prefix, or a long answer pushes the tool calls out of view.
+- **`Accept-Encoding` is forced to `identity` upstream.** The relay forwards raw
+  bytes, so a gzipped response would reach the client fine and reach the observer
+  as compressed noise. Identity encoding keeps "what we relay" and "what we
+  observe" the same bytes. Do not "restore" compression on the upstream leg.
+- **The path is a prefix, not a pinned endpoint.** The base-URL swap is the whole
+  integration, so `/chat/completions`, `/models` and `/embeddings` must all
+  route: the inbound suffix is appended to the configured upstream base. An
+  endpoint-pinning relay would break every non-completion call.
+- **The proxy is on the credential path.** `Authorization` is relayed by default
+  — the opposite of the MCP proxy, which dropped client credentials — because
+  the request simply fails without it. Never log a credential; use
+  `headers.redact` at the point of logging, not at parse time.
+- **Fail closed on the unknown.** `ResponseContext.may_dispatch_tools` is true
+  when intents were observed *or* when the response could not be read: an
+  unparseable success body, or a stream that ended without `[DONE]`. Never invert
+  this default — it would wave through exactly the responses the proxy failed to
+  understand.
+- **Hook dispatch goes through `hooks.dispatch`, never `hooks.on_x(...)`.**
+  `normalize_hooks` passes a lone hook straight through instead of wrapping it,
+  so calling the attribute directly makes partial hooks work with two observers
+  registered and crash with one. Routing every call through the helper is what
+  keeps "hooks may implement a subset" true.
 - **ASGI responses terminate exactly once.** `_ResponseState` tracks
   `started`/`completed`; `terminate()` is idempotent and shielded from
-  cancellation. Two bugs already came from this: setting `completed` after the
-  stream loop (skipped the final `more_body: False`), and not cancelling the
-  disconnect watcher (deadlock, since `receive()` only returns on disconnect).
+  cancellation. Two bugs already came from this and are guarded by tests in
+  `tests/test_relay.py`: setting `completed` after the stream loop (skipped the
+  final `more_body: False`), and not cancelling the disconnect watcher (deadlock,
+  since `receive()` only returns on disconnect).
 
 ## Documentation style
 
-Docstrings use Google style with `Args:`/`Returns:`/`Raises:`. Every module has
-a prose docstring explaining *why*, not just *what* — the relay and messages
-modules are the model to follow.
+Docstrings use Google style with `Args:`/`Returns:`/`Raises:`. Every module has a
+prose docstring explaining *why*, not just *what* — the relay and chat modules
+are the model to follow.
 
 ## Editing this repo
 

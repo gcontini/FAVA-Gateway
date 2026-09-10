@@ -1,25 +1,26 @@
-"""The forwarding relay: a byte-exact MCP reverse proxy over Streamable HTTP.
+"""The forwarding relay: a byte-exact reverse proxy for an OpenAI-compatible API.
 
 This module is the only component that touches the wire. It holds no protocol
-state and never rewrites a message: it buffers an inbound request, relays it to
-the backend, streams the backend's response straight back to the client, and
-notifies :class:`~mcp_proxy.hooks.ProxyHooks` around the exchange.
+state and never rewrites a message: it buffers an inbound request, relays it
+upstream, streams the provider's response straight back to the client, and
+notifies :class:`~llm_proxy.hooks.ProxyHooks` around the exchange.
 
 Design notes:
 
-* **Raw ASGI, not Starlette.** A framework would re-encode bodies and manage
-  its own headers; relaying at the ASGI level keeps every byte, status code and
-  header the backend produced.
-* **Sessions stay where they belong.** ``Mcp-Session-Id`` is relayed in both
-  directions untouched, so the client's session is with the *backend*, not with
-  the proxy. The proxy can therefore be restarted or scaled without dropping
-  agent sessions.
-* **Both envelope eras work.** The 2025-era stateful flow (session id, GET
-  stream, resumable ``Last-Event-ID``) and the stateless ``2026-07-28`` header
-  envelope are both just bytes here; the proxy relays whichever the client uses.
-* **Observation never mutates.** Request/response bodies are parsed for hooks
-  only; a parse failure still results in a faithful forward, and a raising hook
-  is logged rather than propagated.
+* **Raw ASGI, not Starlette.** A framework would re-encode bodies and manage its
+  own headers; relaying at the ASGI level keeps every byte, status code and
+  header the provider produced. That fidelity is the point — an agent harness
+  must not be able to tell the proxy is there.
+* **The path is a prefix, not an endpoint.** The integration is a ``base_url``
+  swap, so everything under the mount prefix routes: ``/chat/completions``,
+  ``/models``, ``/embeddings``. The inbound suffix is appended to the configured
+  upstream base.
+* **Observation is incremental.** Response bytes are fed to a
+  :class:`~llm_proxy.chat.ResponseObserver` as they stream past, so a long
+  answer can never push the model's tool calls out of view. The relay's own
+  forwarding is unaffected by what the observer does or fails to do.
+* **Observation never mutates.** A parse failure still results in a faithful
+  forward, and a raising hook is logged rather than propagated.
 """
 
 from __future__ import annotations
@@ -27,49 +28,40 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Final
 
 import anyio
-import httpx2
+import httpx
 from starlette.types import Message, Receive, Scope, Send
 
-from mcp.types.jsonrpc import INTERNAL_ERROR
-
-from mcp_proxy.config import ProxySettings
-from mcp_proxy.headers import forward_request_headers, forward_response_headers
-from mcp_proxy.hooks import (
+from llm_proxy.chat import ChatResponse, ResponseObserver, parse_chat_request
+from llm_proxy.config import ProxySettings
+from llm_proxy.headers import forward_request_headers, forward_response_headers
+from llm_proxy.hooks import (
     ProxyHooks,
     RequestContext,
     ResponseContext,
-    call_swallowing,
+    dispatch,
     normalize_hooks,
 )
-from mcp_proxy.messages import parse_response_body, parse_wire_messages
 
 logger = logging.getLogger(__name__)
 
-# Default observation cap for streamed responses. An SSE stream may run for
-# minutes and grow without bound, so hooks see only a prefix; the relay itself
-# is unaffected and still forwards every byte.
-DEFAULT_OBSERVE_LIMIT: Final = 256 * 1024
-
-# Hop-by-hop and server-owned headers are handled in `mcp_proxy.headers`.
 _JSON_CONTENT_TYPE: Final = b"application/json"
 
-# HTTP methods that may carry a request body. The standalone SSE `GET` stream
-# and session-terminating `DELETE` must not gain one.
+# HTTP methods that may carry a request body.
 _BODY_METHODS: Final = frozenset({"POST", "PUT", "PATCH"})
 
 
 class ForwardingProxy:
-    """An ASGI application that relays MCP traffic to a single backend endpoint.
+    """An ASGI application that relays LLM API traffic to a single upstream.
 
     Call instances directly as an ASGI app, or wrap them with
-    :func:`mcp_proxy.app.create_proxy_app` for lifespan and routing conveniences.
+    :func:`llm_proxy.app.create_proxy_app` for lifespan and CORS conveniences.
 
     Attributes:
-        settings: The immutable :class:`~mcp_proxy.config.ProxySettings`.
+        settings: The immutable :class:`~llm_proxy.config.ProxySettings`.
         hooks: The observer invoked around each exchange.
     """
 
@@ -78,12 +70,12 @@ class ForwardingProxy:
         settings: ProxySettings,
         *,
         hooks: ProxyHooks | Sequence[ProxyHooks] | None = None,
-        http_client: httpx2.AsyncClient | None = None,
+        http_client: httpx.AsyncClient | None = None,
     ) -> None:
         """Create a relay.
 
         Args:
-            settings: Backend URL, mount path and relay limits.
+            settings: Upstream base URL, mount prefix and relay limits.
             hooks: One hook, a sequence of hooks (composed and failure-isolated),
                 or ``None`` for no observation.
             http_client: Optional pre-built upstream client. When ``None`` the
@@ -92,9 +84,8 @@ class ForwardingProxy:
         """
         self.settings = settings
         self.hooks: ProxyHooks = normalize_hooks(hooks)
-        self._client: httpx2.AsyncClient | None = http_client
+        self._client: httpx.AsyncClient | None = http_client
         self._own_client = http_client is None
-        self._observe_limit = max(0, min(settings.max_body_size, DEFAULT_OBSERVE_LIMIT))
 
     # -- ASGI plumbing ---------------------------------------------------
 
@@ -133,7 +124,7 @@ class ForwardingProxy:
         """Create the upstream HTTP client when the relay owns it."""
         if self._client is None and self._own_client:
             self._client = self._build_client()
-            logger.info("Upstream client ready for %s", self.settings.backend_url)
+            logger.info("Upstream client ready for %s", self.settings.upstream_url)
 
     async def shutdown(self) -> None:
         """Close the upstream HTTP client when the relay owns it."""
@@ -142,13 +133,14 @@ class ForwardingProxy:
             await client.aclose()
             logger.info("Upstream client closed")
 
-    def _build_client(self) -> httpx2.AsyncClient:
-        """Build an upstream client with MCP-appropriate timeouts."""
-        return httpx2.AsyncClient(
-            # The 300s read timeout mirrors the MCP SDK: a streamable HTTP server
-            # may hold a response stream open far longer than a normal request.
-            timeout=httpx2.Timeout(self.settings.timeout, read=self.settings.sse_read_timeout),
-            # Redirects belong to the client and the backend, not to the relay:
+    def _build_client(self) -> httpx.AsyncClient:
+        """Build an upstream client with completion-appropriate timeouts."""
+        return httpx.AsyncClient(
+            # The read timeout is generous: a model may pause a long time
+            # between tokens, and a tool-calling turn holds the stream open
+            # throughout.
+            timeout=httpx.Timeout(self.settings.timeout, read=self.settings.stream_read_timeout),
+            # Redirects belong to the client and the provider, not to the relay:
             # forward them instead of silently following them upstream.
             follow_redirects=False,
         )
@@ -168,27 +160,22 @@ class ForwardingProxy:
                 200,
                 {
                     "status": "ok",
-                    "backend_url": self.settings.backend_url,
-                    "mount_path": self.settings.mount_path,
+                    "upstream_url": self.settings.upstream_url,
+                    "mount_prefix": self.settings.mount_prefix,
                     "health_path": path,
                     "upstream_client_ready": self._client is not None,
                 },
             )
             return
 
-        if not self._path_accepted(path):
-            await _send_local_json(
+        suffix = self._upstream_suffix(path)
+        if suffix is None:
+            await _send_api_error(
                 send,
                 404,
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": INTERNAL_ERROR,
-                        "message": f"No MCP endpoint at {path}",
-                    },
-                },
-                extra_message=f"this proxy serves {self.settings.mount_path!r}",
+                message=f"No API endpoint at {path}; this proxy serves {self.settings.mount_prefix!r}",
+                error_type="invalid_request_error",
+                code="unknown_path",
             )
             return
 
@@ -196,70 +183,61 @@ class ForwardingProxy:
         try:
             body = await _read_body(receive, limit=self.settings.max_body_size)
         except _BodyTooLarge:
-            await _send_local_json(
+            await _send_api_error(
                 send,
                 413,
-                {
-                    "jsonrpc": "2.0",
-                    "id": None,
-                    "error": {
-                        "code": INTERNAL_ERROR,
-                        "message": f"Request body exceeds {self.settings.max_body_size} bytes",
-                    },
-                },
+                message=f"Request body exceeds {self.settings.max_body_size} bytes",
+                error_type="invalid_request_error",
+                code="request_too_large",
             )
             return
 
-        context = self._build_request_context(scope, http_method, path, query, headers, body)
-        await call_swallowing(self.hooks.on_request, context)
+        context = RequestContext(
+            http_method=http_method,
+            path=path,
+            upstream_suffix=suffix,
+            query=query,
+            headers=headers,
+            body_size=len(body) if body else 0,
+            chat=parse_chat_request(body),
+            client=_peer(scope),
+        )
+        await dispatch(self.hooks, "on_request", context)
 
         client = self._client
         if client is not None:
             await self._relay(context, client, body, receive, send)
             return
 
-        # No lifespan ran (a direct `__call__`, as in tests), so the relay builds
-        # a client for this exchange only and closes it afterwards.
+        # No lifespan ran (a direct `__call__`, as in tests), so the relay
+        # builds a client for this exchange only and closes it afterwards.
         ephemeral = self._build_client()
         try:
             await self._relay(context, ephemeral, body, receive, send)
         finally:
             await ephemeral.aclose()
 
-    def _path_accepted(self, path: str) -> bool:
-        """Whether an inbound path may be relayed to the backend."""
-        mount = self.settings.mount_path
-        if mount is None:
-            return True
-        return _norm(path) == _norm(mount)
+    def _upstream_suffix(self, path: str) -> str | None:
+        """The path portion to append upstream, or ``None`` if unmounted.
 
-    def _build_request_context(
-        self,
-        scope: Scope,
-        http_method: str,
-        path: str,
-        query: str,
-        headers: Mapping[str, str],
-        body: bytes | None,
-    ) -> RequestContext:
-        """Assemble the :class:`RequestContext` handed to hooks."""
-        client = scope.get("client")
-        return RequestContext(
-            http_method=http_method,
-            path=path,
-            query=query,
-            headers=headers,
-            body_size=len(body) if body else 0,
-            messages=parse_wire_messages(body, headers=headers, kind="request"),
-            session_id=headers.get("mcp-session-id"),
-            protocol_version=headers.get("mcp-protocol-version"),
-            client=(client[0], client[1]) if client else None,
-        )
+        With a mount prefix of ``/v1``, an inbound ``/v1/chat/completions``
+        yields ``/chat/completions``. With no prefix the whole path is
+        forwarded, in which case the configured upstream base should not
+        already repeat it.
+        """
+        prefix = self.settings.mount_prefix
+        if prefix is None:
+            return path
+        if path == prefix:
+            return ""
+        if path.startswith(f"{prefix}/"):
+            return path[len(prefix) :]
+        return None
 
     async def _relay(
         self,
         context: RequestContext,
-        client: httpx2.AsyncClient,
+        client: httpx.AsyncClient,
         body: bytes | None,
         receive: Receive,
         send: Send,
@@ -280,15 +258,15 @@ class ForwardingProxy:
         """
         state = _ResponseState()
         try:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(self._watch_disconnect, context, receive, tg.cancel_scope)
+            async with anyio.create_task_group() as task_group:
+                task_group.start_soon(self._watch_disconnect, context, receive, task_group.cancel_scope)
                 try:
                     await self._relay_stream(client, context, body, send, state)
                 finally:
-                    tg.cancel_scope.cancel()
+                    task_group.cancel_scope.cancel()
         finally:
             if state.notify is not None:
-                await call_swallowing(self.hooks.on_response, state.notify)
+                await dispatch(self.hooks, "on_response", state.notify)
 
     async def _watch_disconnect(
         self,
@@ -306,7 +284,7 @@ class ForwardingProxy:
 
     async def _relay_stream(
         self,
-        client: httpx2.AsyncClient,
+        client: httpx.AsyncClient,
         context: RequestContext,
         body: bytes | None,
         send: Send,
@@ -320,12 +298,13 @@ class ForwardingProxy:
         except anyio.get_cancelled_exc_class():
             raise
         except Exception as exc:  # reachability, DNS, TLS, timeout
-            logger.warning("Cannot reach backend at %s: %s", self.settings.backend_url, exc)
+            logger.warning("Cannot reach upstream at %s: %s", self.settings.upstream_url, exc)
             await self._fail(context, send, state, exc, status_code=502)
             return
 
         upstream = state.upstream
         assert upstream is not None  # noqa: S101 - set or returned above
+        state.observer = ResponseObserver(content_type=upstream.headers.get("content-type"))
         try:
             await send(
                 {
@@ -339,8 +318,10 @@ class ForwardingProxy:
             async for chunk in upstream.aiter_raw():
                 if not chunk:
                     continue
+                # Forward first, observe second: observation must never sit
+                # between the provider's bytes and the client.
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
-                state.observe(chunk, self._observe_limit)
+                state.observe(chunk)
             # `state.completed` is deliberately left unset here: `terminate` in
             # the `finally` below owns sending the final `more_body: False`
             # message, and marking completion early would make it skip that and
@@ -367,20 +348,14 @@ class ForwardingProxy:
         if upstream is None:
             return None
         lowered = {name.lower(): value for name, value in upstream.headers.items()}
-        content_type = lowered.get("content-type")
-        payload = b"".join(state.observed)
-        # A truncated capture is not parsable as a whole JSON body, but the
-        # completed frames of an SSE stream are still worth surfacing.
-        is_stream = content_type is not None and "text/event-stream" in content_type.lower()
-        messages = parse_response_body(payload, content_type=content_type) if is_stream or not state.truncated else ()
+        chat: ChatResponse | None = state.observer.result() if state.observer is not None else None
         return ResponseContext(
             request=context,
             status_code=upstream.status_code,
             headers=lowered,
-            content_type=content_type,
-            messages=messages,
-            body_size=len(payload),
-            truncated=state.truncated,
+            content_type=lowered.get("content-type"),
+            chat=chat,
+            body_size=state.observer.observed_size if state.observer else 0,
             stream_closed_early=state.client_gone or state.error is not None,
         )
 
@@ -393,61 +368,51 @@ class ForwardingProxy:
         *,
         status_code: int,
     ) -> None:
-        """Answer a request that could not be relayed with a JSON-RPC error.
+        """Answer a request that could not be relayed with an API-shaped error.
 
-        The request id is echoed from the parsed envelope so an MCP client can
-        correlate the failure with the call it made. Nothing is written when the
-        response already started, since the status line is on the wire.
+        The body mirrors the provider's own error envelope so a client SDK
+        surfaces it as an API error rather than failing to parse the response.
+        Nothing is written when the response already started, since the status
+        line is on the wire.
         """
-        await call_swallowing(self.hooks.on_relay_error, context, error)
+        await dispatch(self.hooks, "on_relay_error", context, error)
         if state.started:
             return
-        request_id = next((message.id for message in context.messages if message.is_request), None)
-        # `_send_local_json` writes both the start and the terminating body
+        # `_send_api_error` writes both the start and the terminating body
         # message, so mark the exchange ended for `terminate`'s idempotence.
         state.started = True
         state.completed = True
         try:
-            await _send_local_json(
+            await _send_api_error(
                 send,
                 status_code,
-                {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {
-                        "code": INTERNAL_ERROR,
-                        "message": f"Bad gateway relaying to backend: {type(error).__name__}",
-                    },
-                },
+                message=f"Bad gateway relaying to upstream: {type(error).__name__}",
+                error_type="upstream_error",
+                code="bad_gateway",
             )
         except Exception as exc:  # noqa: BLE001 - the exchange may already be dead
             logger.debug("Could not write gateway error response: %s", exc)
 
     def _build_upstream_request(
         self,
-        client: httpx2.AsyncClient,
+        client: httpx.AsyncClient,
         context: RequestContext,
         body: bytes | None,
-    ) -> httpx2.Request:
-        """Build the upstream request from the relayed bytes and headers.
-
-        The backend URL's own path always wins: the proxy serves one MCP
-        endpoint, so the inbound path is not appended. The inbound query string
-        is preserved when :attr:`ProxySettings.query_passthrough` is set.
-        """
-        url = self.settings.backend_url
+    ) -> httpx.Request:
+        """Build the upstream request from the relayed bytes and headers."""
+        url = f"{self.settings.upstream_url}{context.upstream_suffix}"
         if self.settings.query_passthrough and context.query:
             separator = "&" if "?" in url else "?"
             url = f"{url}{separator}{context.query}"
 
         headers = forward_request_headers(
             context.headers.items(),
-            host=httpx2.URL(url).netloc.decode("ascii"),
+            host=httpx.URL(url).netloc.decode("ascii"),
             extra=dict(self.settings.extra_headers),
             trust_client_headers=self.settings.trust_client_headers,
+            forward_client_auth=self.settings.forward_client_auth,
         )
-        # A `GET` for the standalone SSE stream and a session-terminating
-        # `DELETE` arrive with no body and must not gain one upstream.
+        # A bodyless `GET` (e.g. `/v1/models`) must not gain one upstream.
         content = body if context.http_method.upper() in _BODY_METHODS and body else None
         return client.build_request(context.http_method, url, content=content, headers=headers)
 
@@ -458,44 +423,35 @@ class _ResponseState:
 
     Tracks what has been sent to the client so the relay terminates the ASGI
     exchange exactly once — on success, on a mid-stream error, and on client
-    disconnect alike — and accumulates the bounded observation prefix that hooks
-    are shown.
+    disconnect alike — and holds the incremental observer.
 
     Attributes:
-        upstream: The opened backend response.
+        upstream: The opened upstream response.
         started: ``http.response.start`` reached the client, so the status line
             is committed and a locally generated error can no longer be sent.
         completed: The response body was fully relayed.
         client_gone: The client disconnected mid-exchange.
         error: The relay failure, when one occurred.
-        truncated: The observation prefix dropped bytes (the relay did not).
-        observed: Chunks of the observed prefix.
+        observer: Parses the response as it streams past.
         notify: The :class:`ResponseContext` awaiting hook dispatch.
     """
 
-    upstream: httpx2.Response | None = None
+    upstream: httpx.Response | None = None
     started: bool = False
     completed: bool = False
     client_gone: bool = False
     error: BaseException | None = None
-    truncated: bool = False
-    observed: list[bytes] = field(default_factory=list)
+    observer: ResponseObserver | None = None
     notify: ResponseContext | None = None
-    _observed_size: int = 0
 
-    def observe(self, chunk: bytes, limit: int) -> None:
-        """Record up to ``limit`` bytes of a streamed response for hooks.
-
-        The relay's own forwarding is untouched by this cap, which exists only
-        so a long-lived SSE stream cannot grow hooks' memory without bound.
-        """
-        if self._observed_size >= limit:
-            self.truncated = True
+    def observe(self, chunk: bytes) -> None:
+        """Feed a relayed chunk to the observer, never disturbing the relay."""
+        if self.observer is None:
             return
-        keep = limit - self._observed_size
-        self.observed.append(chunk[:keep])
-        self._observed_size += min(len(chunk), keep)
-        self.truncated = self.truncated or len(chunk) > keep
+        try:
+            self.observer.feed(chunk)
+        except Exception:  # noqa: BLE001 - observation is best-effort by design
+            logger.exception("Response observation failed; continuing relay")
 
     async def terminate(self, send: Send) -> None:
         """Send the final ASGI body message when a response was started."""
@@ -516,17 +472,18 @@ class _BodyTooLarge(Exception):
 
 
 def _norm(path: str) -> str:
-    """Normalize a path for comparison by stripping a trailing slash.
-
-    ``/mcp`` and ``/mcp/`` must behave identically: the SDK's own session
-    manager treats them as the same endpoint, and a proxy that disagreed would
-    send one of them to its 404 branch.
-    """
+    """Normalize a path for comparison by stripping a trailing slash."""
     return path.rstrip("/") or "/"
 
 
+def _peer(scope: Scope) -> tuple[str, int] | None:
+    """Extract the inbound ``(host, port)`` from an ASGI scope, if present."""
+    client = scope.get("client")
+    return (client[0], client[1]) if client else None
+
+
 def _scope_headers(scope: Scope) -> dict[str, str]:
-    """Flatten ASGI header pairs into a lowercase-valued mapping."""
+    """Flatten ASGI header pairs into a lowercase-keyed mapping."""
     headers: dict[str, str] = {}
     for raw_name, raw_value in scope.get("headers") or ():
         headers[raw_name.decode("latin-1").lower()] = raw_value.decode("latin-1")
@@ -537,7 +494,7 @@ async def _read_body(receive: Receive, *, limit: int) -> bytes | None:
     """Buffer the inbound body, rejecting anything over ``limit`` bytes.
 
     Returns ``None`` when the request carried no body at all (as distinguished
-    from an empty body), because a relayed ``GET``/``DELETE`` must not gain one.
+    from an empty body), because a relayed ``GET`` must not gain one.
     """
     chunks: list[bytes] = []
     total = 0
@@ -559,28 +516,9 @@ async def _read_body(receive: Receive, *, limit: int) -> bytes | None:
     return b"".join(chunks) if saw_body else None
 
 
-async def _send_local_json(
-    send: Send,
-    status_code: int,
-    payload: Mapping[str, Any],
-    *,
-    extra_message: str | None = None,
-) -> None:
-    """Write a locally generated JSON response.
-
-    Args:
-        send: The ASGI send callable.
-        status_code: HTTP status to report.
-        payload: JSON-serializable body.
-        extra_message: Appended to a JSON-RPC error message when present.
-    """
-    body_payload = dict(payload)
-    if extra_message is not None and isinstance(body_payload.get("error"), dict):
-        error = dict(body_payload["error"])
-        error["message"] = f"{error.get('message', '')} ({extra_message})"
-        body_payload["error"] = error
-
-    body = json.dumps(body_payload).encode("utf-8")
+async def _send_local_json(send: Send, status_code: int, payload: Mapping[str, Any]) -> None:
+    """Write a locally generated JSON response."""
+    body = json.dumps(dict(payload)).encode("utf-8")
     await send(
         {
             "type": "http.response.start",
@@ -592,3 +530,24 @@ async def _send_local_json(
         }
     )
     await send({"type": "http.response.body", "body": body, "more_body": False})
+
+
+async def _send_api_error(
+    send: Send,
+    status_code: int,
+    *,
+    message: str,
+    error_type: str,
+    code: str,
+) -> None:
+    """Write an error in the provider's own envelope.
+
+    Client SDKs parse ``{"error": {...}}`` and raise a typed API error from it.
+    Anything else surfaces to the agent as a decoding failure, which hides what
+    actually went wrong.
+    """
+    await _send_local_json(
+        send,
+        status_code,
+        {"error": {"message": message, "type": error_type, "param": None, "code": code}},
+    )
