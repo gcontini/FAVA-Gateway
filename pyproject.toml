@@ -1,0 +1,36 @@
+[project]
+name = "fava"
+version = "0.1.0"
+description = "FAVA: pass-through MCP reverse proxy (authorization seam placeholder)"
+requires-python = ">=3.10"
+dependencies = [
+    # Official Model Context Protocol SDK (v2: streamable HTTP transports, JSON-RPC types).
+    "mcp[cli]>=2.2.0",
+    # The MCP v2 SDK relays HTTP over httpx2; the proxy uses the SDK's client factory.
+    "httpx2>=2.5.0",
+    "starlette>=1.6",
+    "uvicorn>=0.52",
+    "anyio>=4.15",
+]
+
+[project.scripts]
+# `uv run fava-mcp-proxy --backend-url http://host:port/mcp`
+fava-mcp-proxy = "mcp_proxy.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The distribution `fava` ships the `mcp_proxy` package from src/.
+packages = ["src/mcp_proxy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
