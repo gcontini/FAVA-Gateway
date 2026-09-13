@@ -1,0 +1,7 @@
+{
+    "workbench.activityBar.compact": true,
+    "workbench.iconTheme": "vscode-modern-icons",
+    "workbench.editor.decorations.colors": true,
+    "workbench.colorTheme": "Light+",
+    "workbench.view.alwaysShowHeaderActions": true,
+}

@@ -4,13 +4,14 @@ version = "0.1.0"
 description = "FAVA: pass-through LLM API reverse proxy (authorization seam placeholder)"
 requires-python = ">=3.10"
 dependencies = [
-    # The upstream leg. Plain httpx: nothing MCP-specific remains, and the
-    # OpenAI SDK used in the tests depends on httpx too, so the venv holds one
-    # HTTP stack rather than two.
+    # The upstream leg. Plain httpx: nothing MCP-specific remains.
     "httpx>=0.28",
     "starlette>=1.6",
     "uvicorn>=0.52",
     "anyio>=4.15",
+    # `fava.state.ir.LlmIRExtractor` talks to its own, separately configured
+    # extraction model through this — never through the proxied upstream.
+    "openai>=1.60",
 ]
 
 [project.scripts]
@@ -21,9 +22,6 @@ fava-llm-proxy = "llm_proxy.cli:main"
 dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
-    # Drives the end-to-end tests: a real client pointed at the proxy's base
-    # URL is the deployment contract, so the tests exercise it directly.
-    "openai>=1.60",
 ]
 
 [build-system]
@@ -31,8 +29,10 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-# The distribution `fava` ships the `llm_proxy` package from src/.
-packages = ["src/llm_proxy"]
+# The distribution `fava` ships two packages from src/: `llm_proxy` is the
+# transport, `fava` is everything that reasons about what it relayed. The
+# dependency arrow only ever points `fava` -> `llm_proxy`.
+packages = ["src/llm_proxy", "src/fava"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

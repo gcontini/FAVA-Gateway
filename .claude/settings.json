@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout -s KILL 200 uv run pytest tests/test_units.py -q --no-header)"
+    ]
+  }
+}

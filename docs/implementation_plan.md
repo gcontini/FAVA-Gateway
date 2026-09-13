@@ -1,29 +1,52 @@
 # FAVA implementation plan
 
-Status of Phase 1 and the path to the full FAVA gateway.
+Status, and the path to the full FAVA gateway.
 
-Phase 1 is complete and tested: a pass-through reverse proxy for the
-OpenAI-compatible Chat Completions API (`src/llm_proxy/`) that relays bytes
-exactly and exposes read-only observation hooks. Everything below builds on that
-seam.
+**Phase 1 (relay) and Phases 2 and 4 (state and permission graph) are complete
+and tested.** `src/llm_proxy/` relays bytes exactly and exposes read-only
+observation hooks; `src/fava/state/` turns those observations into per-run
+append-only event logs, an extracted Permission IR, and the evidence-backed
+permission graph lowered from both. Nothing decides on the graph yet — that is
+Phase 5.
 
 The paper is `docs/FAVA_ Formal Authorization for Verified Agents with
 Evidence-Backed Permission Graphs.html` (arXiv:2607.27267v1 [cs.CR]).
+
+## Why this boundary
+
+The gateway sits between the **harness and the LLM API**, not on the MCP wire.
+That placement is what makes the paper's first assumption — that **all**
+security-relevant effects are mediated before execution — holdable at all: a
+proxy on the MCP wire only sees tools routed through MCP servers, so a
+harness's local tools (shell, file edits, web fetch) would stay invisible.
+Intercepting at the harness↔LLM boundary fixes that:
+
+1. **Every tool call passes through here first.** Local and MCP-backed tools
+   alike begin as a tool-call *intent* in the model's response. From the
+   model's side both are just declared tools with a name and a schema — how
+   the harness dispatches them is invisible to the API wire format.
+2. **It is harness-agnostic.** The integration is the standard base-URL
+   override nearly every agent runtime already supports. No plugin, no patch.
+
+The trade-off is that the proxy observes *intent*, not execution. It sees what
+the model asked for, and — on the following request — what the harness
+reported back. It never sees the tool actually run.
 
 ## Where Phase 1 already lands
 
 The proxy is the **runtime enforcement gateway** of the paper's macro
 architecture (§ Runtime Enforcement). It is now in the right *place* — the
 harness↔LLM boundary, where every tool call first appears as an intent
-regardless of how the harness will dispatch it — but today it mediates without
-deciding: it observes and forwards. Nothing yet builds a Permission IR, an
-evidence graph, or consults an authorizer.
+regardless of how the harness will dispatch it — but it still mediates without
+deciding: it observes, builds the graph, and forwards regardless. The Permission
+IR and the evidence graph now exist (Phases 2 and 4); no authorizer consults
+them.
 
 What Phase 1 settled, and that later phases should not re-litigate:
 
 - **The interception point.** A raw ASGI relay at the LLM API boundary, reached
   by a base-URL override. This covers local and MCP-backed tools uniformly,
-  which an MCP-wire proxy cannot (see `README.md`, "Why this boundary").
+  which an MCP-wire proxy cannot (see "Why this boundary" above).
 - **The decision side is the response.** Tool-call intent arrives from the
   provider; the harness dispatches only afterwards. `on_response` is the seam.
 - **Hooks are read-only and best-effort.** The gateway degrades to a pure relay
@@ -33,7 +56,8 @@ What Phase 1 settled, and that later phases should not re-litigate:
   classification the authorizer will gate on: observed intents *or* a response
   too opaque to rule them out.
 - **The tool catalog is in-band.** Every request carries `tools[]`, so there is
-  no catalog to fetch, cache or invalidate.
+  no catalog to fetch, cache or invalidate. `RunState.tool_catalog` holds the
+  most recently declared names; Phase 3's drift detection is still open.
 
 ## Target component decomposition
 
@@ -57,54 +81,48 @@ graph LR
 | Component | Status | Responsibility |
 |---|---|---|
 | `fava-forwarder` | **done** (`relay.py`) | Byte-exact upstream forwarding |
-| `fava-adapter` | skeleton (`relay.py`, `hooks.py`, `chat.py`) | Interception, `run_id` propagation, catalog extraction, event recording |
-| `fava-state` | not started | Per-run state: `run_id → PermissionGraph + events + policy context`, append-only, graph versioning |
-| `fava-graph` | not started | Node/edge construction, deterministic lowering, structural + evidential validation |
+| `fava-adapter` | **done** (`relay.py`, `hooks.py`, `chat.py`, `state/hooks.py`) | Interception, `run_id` propagation, catalog extraction, event recording |
+| `fava-state` | **done** (`state/events.py`, `state/store.py`) | Per-run state: `run_id → PermissionGraph + events + IR`, append-only, graph versioning |
+| `fava-graph` | **done** (`state/graph.py`, `state/ir.py`) | Node/edge construction, lowering, structural + evidential validation |
 | `fava-authorizer` | not started | `Allow / Block / Unknown` decision; SMT backend later; fail closed |
 
-Keep them as modules of one package initially (`fava.state`, `fava.graph`, …).
-Splitting into separate distributions is premature: the interfaces matter, the
-process boundaries do not.
+They are modules of one package (`fava.state`), not separate distributions: the
+interfaces matter, the process boundaries do not. `fava-graph` landed inside
+`fava.state` rather than beside it, because a graph is a pure function of a run's
+log and the two have no independent life; promoting `graph.py` to `fava.graph`
+later is a move, not a redesign.
 
-## Phase 2 — run identity and event recording
+## Phase 2 — run identity and event recording — **done**
 
 **Goal:** attach every observed exchange to a run, and record it append-only.
 
-The critical gap today is that hooks see **HTTP exchanges, not agent runs.**
-FAVA's graphs are per-run, so this must be solved first; nothing else can be
-trusted without it (§ Concurrency Model).
+Delivered as `fava.state.events` + `fava.state.store`, wired in through
+`fava.state.hooks.StateHooks`.
 
-Moving off the MCP wire cost us `Mcp-Session-Id` — but bought something better.
-The conversation history *is* a chain: request *N+1* contains the assistant turn
-from response *N* plus the `role: "tool"` results of the calls it requested. Run
-identity can therefore be recovered from the traffic itself.
+What was settled:
 
-- Derive or propagate a `run_id`. Options, in order of preference:
-  1. Trust a client-supplied header (e.g. `X-FAVA-Run-Id`) when the harness can
-     set one — cleanest, needs cooperation.
-  2. Hash a stable prefix of the message array (system prompt + first user turn).
-     Free and harness-agnostic, since every request in a run repeats it. Beware
-     history truncation and context compaction, which rewrite the prefix
-     mid-run; treat a prefix change as a *new* run rather than silently merging.
-  3. Fall back to peer `(host, port)` — coarse; many runs share a connection
-     pool.
-  Whichever wins, `run_id` must be explicit state, never inferred from the
-  connection alone.
-- Event record (per paper § Evidence): `event_id`, `run_id`, `parent_event_id`,
-  monotonic sequence + timestamp, tool name, argument metadata (not necessarily
-  full argument values — decide and document the retention policy), the intent's
-  provider-assigned `tool_call_id`, and the evidence source.
-- **Correlate intent to outcome across two exchanges.** The intent is observed on
-  response *N*; its result arrives as a `role: "tool"` message on request *N+1*,
-  keyed by `tool_call_id`. `chat.ChatRequest.tool_results` and `prior_tool_calls`
-  already expose both halves. An intent with no matching result was refused,
-  dropped, or is still running — all three are worth recording.
-- Append-only. Repair is monotone: events and edges are added, never rewritten or
-  deleted (§ Monotonic Runtime Repair).
+- **`run_id` comes from the traffic.** `X-FAVA-Run-Id` when a harness sets one,
+  otherwise a SHA-256 of the stable prefix — the system/developer messages plus
+  the first user turn, which every request in a run repeats. The `(host, port)`
+  peer fallback was dropped: a completion always has a prefix to hash, and a
+  request without one has no run to belong to.
+- **A rewritten prefix is a new run.** Truncation and compaction change the
+  hash, and that is the answer, not a problem to solve. A fresh graph built from
+  what is still visible is honest; merging two prefixes would assert a
+  continuity the proxy cannot see.
+- **Five event kinds**, no more: `run_started`, `tool_intent`, `tool_result`,
+  `response_opaque`, `ir_extracted`. Anything derivable is derived — an intent
+  with no result is `EventLog.unanswered_intents()`, not an event, because the
+  absence is the observation.
+- **Intent↔outcome correlation works across the two exchanges**, keyed on
+  `tool_call_id` (`EventLog.intent_for`). Since every request replays the whole
+  history, results are de-duplicated on the way in or the log grows
+  quadratically.
+- **Retention:** arguments whole, result content capped at 64 KiB, in memory,
+  bounded to the most recent `max_runs` runs. No hashing and no redaction mode —
+  add them when there is a deployment that needs one.
 
-**Deliverable:** `fava.state.RecordStore` with `observe_request` /
-`observe_response`, wired into `hooks.py`. In-memory first; Redis behind the same
-interface if state must survive a proxy restart.
+State is in-memory. Redis goes behind `RecordStore`, not inside the relay.
 
 ## Phase 3 — tool catalog normalization
 
@@ -130,28 +148,45 @@ What remains is genuinely harder, though:
 **Deliverable:** `fava.adapter.ToolCatalog` with `describe(run_id, tool_name) →
 ToolSpec | None` plus drift detection.
 
-## Phase 4 — permission graph
+## Phase 4 — permission graph — **done**
 
 **Goal:** build the evidence-backed graph the authorizer reasons over.
 
-- Nodes: `kind ∈ {context, source, tool, sink}` with `id`, `op`,
-  `args`/`outputs`, `labels`, `requests`, `time`.
-- Edges: `type ∈ {data, control, parent}` with `src`, `dst`, `evidence`,
-  `trust ∈ {observed, policy, inferred}`.
-- Deterministic lowering from the recorded events to the graph. Same events ⇒
-  same graph, byte-for-byte — required for auditing and for replaying a decision.
-- Structural validation (well-formed graph) and evidential validation (every edge
-  cites evidence that exists).
-- Version the graph: `(run_id, graph_version)`. A decision is bound to the
-  version it was made against, so a later append cannot silently widen an earlier
-  authorization.
-- **Data flow is unusually visible here.** The whole conversation crosses the
-  wire on every request, so a tool result flowing into a later tool call's
-  arguments is directly observable — the prompt-injection path the paper cares
-  about, available without instrumenting the harness.
+Delivered as `fava.state.ir` (the Permission IR and its LLM extractor) and
+`fava.state.graph` (`lower`, `validate`, capability normalization).
 
-**Deliverable:** `fava.graph.PermissionGraph` plus `fava.graph.lower(events) →
-(graph, version)` and `validate(graph) → list[Violation]`.
+What was settled:
+
+- **Table 1, field for field.** Nodes carry `id`, `kind`, `op`, `args`,
+  `outputs`, `labels`, `requests`, `time`; edges carry `src`, `dst`, `type`,
+  `evidence`, `trust`.
+- **The IR is extracted by an LLM, once per run, in the background.** It never
+  raises: any failure yields `RiskPosture.AMBIGUOUS`, the value the gateway
+  fails closed on. It calls the provider **directly** — routed through the proxy
+  its own request would be observed, minted as a run, and extracted from,
+  recursively.
+- **Data flow is observed, as predicted.** A tool result's content reappearing
+  in a later call's arguments is a `data`/`observed` edge, found by substring
+  match over the decoded argument values. That is the prompt-injection path,
+  available with no harness instrumentation.
+- **Trust is three-valued and load-bearing.** `observed` (seen on the wire),
+  `policy` (a capability matching a named sink, an obligation guarding a call)
+  and `inferred` (an IR asset name appearing in arguments — a string match, not
+  a flow). Only the first two are meant to be trusted; `inferred` edges exist to
+  audit extraction errors.
+- **Capabilities come from policy, not the catalog.** An OpenAI tool definition
+  has no `destructiveHint`, so `capabilities_for` is one small ordered table
+  mapping a tool name and its arguments onto `tool:{name}` plus a coarser
+  `proc:exec:…` / `file:write:…` / `net:send:…`. Explicitly a placeholder.
+- **`graph_version` is `len(log)`** — monotone, and it binds a decision to the
+  exact log prefix it was made against.
+- **Validation returns, never raises**: dangling edges, duplicate ids,
+  ungrounded labels, unknown evidence, a child predating its parent.
+
+**Not built, deliberately:** byte-for-byte graph replay. "Deterministic
+lowering" in the paper means the pass is a plain function rather than an LLM
+judgment, which it is. Reproducing a past graph exactly is an audit feature, and
+it belongs with the first decision worth auditing — not before.
 
 ## Phase 5 — authorizer
 
@@ -269,13 +304,25 @@ arrives on every request as part of the message array, whether or not FAVA asks
 for it. Task context therefore sharpens decisions for free, and fewer requests
 should resolve to `Unknown` than on the MCP wire.
 
-## Suggested order and first task
+## Suggested order and next task
 
 Phases 2 → 6 are strictly sequential: run identity before events, events before a
 graph, a graph before a decision, a decision before enforcement. Phase 3 (catalog
 normalization) is independent and can run in parallel with 4 and 5.
 
-The first concrete task is **Phase 2's `run_id`**, because it is a prerequisite
-for everything else and because the obvious answers are gone: there is no session
-header at this boundary. Decide the propagation mechanism first — including how a
-truncated or compacted history is handled — and the store design follows from it.
+Phases 2 and 4 are done, so **the next task is Phase 5, the authorizer**. The
+graph it needs exists and validates; what remains is to decide on it. Start with
+the placeholder policy — deny-by-default on a configurable dangerous list — so
+the denial path is exercised end to end before any solver work, and so Phase 6's
+control-flow change has something real to gate on.
+
+Two things Phase 5 inherits and must resolve rather than ignore:
+
+- **An IR that has not landed yet.** Extraction is a background task, so the
+  first turn of a run is usually lowered against an `ambiguous` IR. The
+  authorizer must either wait for it with a budget or treat "not yet extracted"
+  as a `Block`, and either way the choice belongs in the decision, not in the
+  store.
+- **`trust`.** Only `observed` and `policy` edges may carry a decision;
+  `inferred` edges are for auditing extraction errors. Nothing enforces that
+  today because nothing reads the graph yet.
