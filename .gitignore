@@ -7,3 +7,7 @@ dist/
 build/
 *.egg-info/
 .env
+uv.lock
+.env.bak
+uv.lock
+uv.lock

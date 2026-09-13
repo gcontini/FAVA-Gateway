@@ -87,13 +87,13 @@ source = { editable = "." }
 dependencies = [
     { name = "anyio" },
     { name = "httpx" },
+    { name = "openai" },
     { name = "starlette" },
     { name = "uvicorn" },
 ]
 
 [package.dev-dependencies]
 dev = [
-    { name = "openai" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -102,13 +102,13 @@ dev = [
 requires-dist = [
     { name = "anyio", specifier = ">=4.15" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "openai", specifier = ">=1.60" },
     { name = "starlette", specifier = ">=1.6" },
     { name = "uvicorn", specifier = ">=0.52" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "openai", specifier = ">=1.60" },
     { name = "pytest", specifier = ">=9.1" },
     { name = "pytest-asyncio", specifier = ">=1.4" },
 ]
