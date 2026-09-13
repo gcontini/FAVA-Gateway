@@ -74,7 +74,8 @@ from fava.state import ExtractorSettings, LlmIRExtractor, RecordStore, StateHook
 settings = ProxySettings(upstream_url="https://api.openai.com/v1")
 # ExtractorSettings is a separate configuration on purpose: the model that
 # extracts the IR, and its credential, must not be the ones under observation.
-# See docs/reference.md for the FAVA_EXTRACTOR_* environment variables.
+# The extractor is always enabled when configured. See docs/reference.md for
+# the FAVA_EXTRACTOR_* environment variables.
 store = RecordStore(extractor=LlmIRExtractor(ExtractorSettings.from_env()))
 app = create_proxy_app(settings, hooks=StateHooks(store))
 

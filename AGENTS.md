@@ -149,8 +149,14 @@ are the model to follow.
 
 ## Editing this repo
 
-- The workspace root is owned by `nobody:nogroup` while `gab` owns the content;
-  `git status` reports *dubious ownership*. Do not "fix" this by changing global
-  git config without asking.
-- `docs/` holds the source paper. Treat it as read-only reference material.
+- The workspace root is owned by `nobody:nogroup` or `gab` owns the content;
+- Never commit. `git commit` and `git push` are forbidden. It will be done manually after inspection.
+- If a file has manual edits (differs from the state you left it) double check with the user before editing or overwriting.
+- `docs/FAVA_ Formal Authorization for Verified Agents with Evidence-Backed Permission Graphs.html` holds the source paper. This is read-only reference material.
 - Never print file-change diffs to chat; edit files directly.
+
+## General conding rules
+
+- Your goal is to keep the code simple and structured: choose the leanest way to reach the goal.
+- Do not insert features and "knobs" that are not requested (optional parameters)
+- If you think there is something that has not been requested but 

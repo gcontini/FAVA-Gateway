@@ -792,10 +792,7 @@ def test_extractor_settings_read_the_environment() -> None:
     assert settings.model == "gpt-4o"
     assert settings.api_key == "sk-extract"
     assert settings.timeout == 5.0
-    assert settings.enabled is True
     assert settings.configured is True
-
-    assert ExtractorSettings.from_env({"FAVA_EXTRACTOR_ENABLED": "0"}).enabled is False
 
 
 def test_extractor_settings_default_to_unconfigured() -> None:

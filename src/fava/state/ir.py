@@ -40,7 +40,6 @@ ENV_BASE_URL: Final = "FAVA_EXTRACTOR_BASE_URL"
 ENV_MODEL: Final = "FAVA_EXTRACTOR_MODEL"
 ENV_API_KEY: Final = "FAVA_EXTRACTOR_API_KEY"
 ENV_TIMEOUT: Final = "FAVA_EXTRACTOR_TIMEOUT"
-ENV_ENABLED: Final = "FAVA_EXTRACTOR_ENABLED"
 
 DEFAULT_EXTRACTOR_TIMEOUT: Final = 20.0
 
@@ -223,8 +222,7 @@ class ExtractorSettings:
     request in flight — set ``FAVA_EXTRACTOR_BASE_URL`` /
     ``FAVA_EXTRACTOR_MODEL`` / ``FAVA_EXTRACTOR_API_KEY`` explicitly (see
     :meth:`from_env`). Leaving any of the three unset — the default — leaves
-    extraction unconfigured and every run ambiguous, same as
-    ``FAVA_EXTRACTOR_ENABLED=0``.
+    extraction unconfigured and every run ambiguous.
 
     Attributes:
         base_url: OpenAI-compatible **base** URL for the extraction model's
@@ -235,14 +233,12 @@ class ExtractorSettings:
         api_key: Credential for the extraction call. Required — this is not
             the agent's own credential.
         timeout: Seconds for the whole extraction call.
-        enabled: Set false to skip extraction entirely.
     """
 
     base_url: str = ""
     model: str = ""
     api_key: str = ""
     timeout: float = DEFAULT_EXTRACTOR_TIMEOUT
-    enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.base_url:
@@ -271,13 +267,11 @@ class ExtractorSettings:
         except ValueError as exc:
             raise ValueError(f"{ENV_TIMEOUT} must be a number, got {raw_timeout!r}") from exc
 
-        enabled = env.get(ENV_ENABLED, "1").strip().lower() not in ("0", "false", "no", "off")
         return cls(
             base_url=env.get(ENV_BASE_URL, ""),
             model=env.get(ENV_MODEL, ""),
             api_key=env.get(ENV_API_KEY, ""),
             timeout=timeout,
-            enabled=enabled,
         )
 
 
@@ -366,8 +360,6 @@ class LlmIRExtractor:
             The extracted IR, or an ambiguous one carrying ``error``. Never
             raises: an observer on the relay's path must not be able to fail.
         """
-        if not self.settings.enabled:
-            return PermissionIR.unknown("extraction disabled")
         if not task_text.strip():
             return PermissionIR.unknown("no task text to extract from")
         if not self.settings.base_url:

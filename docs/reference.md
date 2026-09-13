@@ -27,8 +27,8 @@ of the three variables below default from `LLM_PROXY_*` above. The model that
 extracts the IR must be a different model from the one under observation,
 reached with its own credential, never the monitored agent's — otherwise the
 very traffic FAVA reasons about could shape its own risk assessment. Leaving
-any of the three unset leaves extraction unconfigured, same as
-`FAVA_EXTRACTOR_ENABLED=0`: every run then stays `ambiguous`.
+any of the three unset leaves extraction unconfigured, and every run then stays
+`ambiguous`.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -36,7 +36,6 @@ any of the three unset leaves extraction unconfigured, same as
 | `FAVA_EXTRACTOR_MODEL` | — (required) | Model to extract the IR with — not the model the harness asked for |
 | `FAVA_EXTRACTOR_API_KEY` | — (required) | Credential for the extraction call — not the agent's own |
 | `FAVA_EXTRACTOR_TIMEOUT` | `20` | Seconds for the whole extraction call |
-| `FAVA_EXTRACTOR_ENABLED` | `1` | Set `0` to skip extraction; every run then stays `ambiguous` |
 
 `LlmIRExtractor` calls the model through the `openai` package's
 `AsyncOpenAI` client, so **any OpenAI-compatible endpoint works**, not just
