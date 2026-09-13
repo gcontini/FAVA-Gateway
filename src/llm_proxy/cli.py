@@ -53,7 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the CLI argument parser."""
     parser = argparse.ArgumentParser(
         prog="fava-llm-proxy",
-        description="Pass-through LLM API reverse proxy: relays OpenAI-compatible traffic to a provider.",
+        description="Pass-through LLM API reverse proxy: relays OpenAI-compatible traffic to a "
+        "provider.",
     )
     parser.add_argument(
         "--upstream-url",
@@ -61,12 +62,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Upstream API base URL, e.g. https://api.openai.com/v1. "
         f"Defaults to the {ENV_UPSTREAM_URL} environment variable.",
     )
-    parser.add_argument("--host", default=None, help="Bind address for the proxy. Default 127.0.0.1.")
-    parser.add_argument("--port", type=int, default=None, help=f"Bind port for the proxy. Default {DEFAULT_PORT}.")
+    parser.add_argument(
+        "--host", default=None, help="Bind address for the proxy. Default 127.0.0.1."
+    )
+    parser.add_argument(
+        "--port", type=int, default=None, help=f"Bind port for the proxy. Default {DEFAULT_PORT}."
+    )
     parser.add_argument(
         "--mount-prefix",
         default=None,
-        help=f"Path prefix the proxy serves. Default {DEFAULT_MOUNT_PREFIX}. Pass '*' to accept any path.",
+        help=f"Path prefix the proxy serves. Default {DEFAULT_MOUNT_PREFIX}. "
+        "Pass '*' to accept any path.",
     )
     parser.add_argument(
         "--api-key",
@@ -80,7 +86,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME:VALUE",
-        help="Extra header sent upstream, repeatable. Overrides an inbound header of the same name.",
+        help="Extra header sent upstream, repeatable. Overrides an inbound header of the "
+        "same name.",
     )
     parser.add_argument(
         "--no-forward-client-auth",
@@ -104,15 +111,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--stream-read-timeout",
         type=float,
         default=None,
-        help=f"Upstream read timeout in seconds. Default {DEFAULT_STREAM_READ_TIMEOUT:g}, because a "
-        "model may pause a long time between tokens.",
+        help=f"Upstream read timeout in seconds. Default {DEFAULT_STREAM_READ_TIMEOUT:g}, "
+        "because a model may pause a long time between tokens.",
     )
     parser.add_argument(
         "--allow-origin",
         action="append",
         default=[],
         metavar="ORIGIN",
-        help="CORS origin, repeatable. Off by default (a server-side agent harness does not need it).",
+        help="CORS origin, repeatable. Off by default (a server-side agent harness does not "
+        "need it).",
     )
     parser.add_argument(
         "--access-log",
@@ -154,7 +162,9 @@ _ARG_DEFAULTS: dict[str, object] = {
 }
 
 
-def settings_from_args(args: argparse.Namespace, environ: Mapping[str, str] | None = None) -> ProxySettings:
+def settings_from_args(
+    args: argparse.Namespace, environ: Mapping[str, str] | None = None
+) -> ProxySettings:
     """Combine CLI arguments, then environment, then defaults into settings.
 
     Precedence per field is: explicit CLI flag, environment variable, default.
@@ -171,7 +181,9 @@ def settings_from_args(args: argparse.Namespace, environ: Mapping[str, str] | No
     env = os.environ if environ is None else environ
     upstream_url = args.upstream_url or env.get(ENV_UPSTREAM_URL)
     if not upstream_url:
-        raise SystemExit(f"an upstream URL is required: pass --upstream-url or set {ENV_UPSTREAM_URL}")
+        raise SystemExit(
+            f"an upstream URL is required: pass --upstream-url or set {ENV_UPSTREAM_URL}"
+        )
 
     extra_headers = parse_extra_headers(args.header)
     api_key = args.api_key or env.get(ENV_API_KEY)
@@ -183,14 +195,22 @@ def settings_from_args(args: argparse.Namespace, environ: Mapping[str, str] | No
     return ProxySettings(
         upstream_url=upstream_url,
         mount_prefix=normalize_mount_prefix(
-            str(_resolve(args.mount_prefix, env.get(ENV_MOUNT_PREFIX), _ARG_DEFAULTS["mount_prefix"]))
+            str(
+                _resolve(
+                    args.mount_prefix, env.get(ENV_MOUNT_PREFIX), _ARG_DEFAULTS["mount_prefix"]
+                )
+            )
         ),
         host=str(_resolve(args.host, env.get(ENV_HOST), _ARG_DEFAULTS["host"])),
         port=int(_resolve(args.port, env.get(ENV_PORT), _ARG_DEFAULTS["port"])),
         extra_headers=extra_headers,
         timeout=float(_resolve(args.timeout, env.get(ENV_TIMEOUT), _ARG_DEFAULTS["timeout"])),
         stream_read_timeout=float(
-            _resolve(args.stream_read_timeout, env.get(ENV_STREAM_READ_TIMEOUT), _ARG_DEFAULTS["stream_read_timeout"])
+            _resolve(
+                args.stream_read_timeout,
+                env.get(ENV_STREAM_READ_TIMEOUT),
+                _ARG_DEFAULTS["stream_read_timeout"],
+            )
         ),
         max_body_size=int(env.get(ENV_MAX_BODY) or DEFAULT_MAX_BODY_SIZE),
         trust_client_headers=args.trust_client_headers,
@@ -231,7 +251,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     logger = logging.getLogger(__name__)
     logger.info("Point your agent harness at base_url=%s", settings.base_url_for_clients)
 
-    uvicorn.run(app, host=settings.host, port=settings.port, log_level=args.log_level, lifespan="on")
+    uvicorn.run(
+        app, host=settings.host, port=settings.port, log_level=args.log_level, lifespan="on"
+    )
     return 0
 
 

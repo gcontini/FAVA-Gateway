@@ -50,7 +50,9 @@ def create_proxy_app(
         An ASGI app. Pass it to ``uvicorn.Server``, ``uvicorn.run``, or mount it
         under a path in an existing router.
     """
-    observers: list[ProxyHooks] = list(hooks) if isinstance(hooks, Sequence) else [hooks] if hooks is not None else []
+    observers: list[ProxyHooks] = (
+        list(hooks) if isinstance(hooks, Sequence) else [hooks] if hooks is not None else []
+    )
     if access_log:
         observers.append(LoggingHooks())
 

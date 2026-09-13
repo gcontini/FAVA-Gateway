@@ -250,10 +250,18 @@ def parse_chat_request(body: bytes | None) -> ChatRequest | None:
         return ChatRequest(raw=decoded, validation_error="request body must be a JSON object")
 
     raw_messages = decoded.get("messages")
-    messages = tuple(m for m in raw_messages if isinstance(m, Mapping)) if isinstance(raw_messages, list) else ()
+    messages = (
+        tuple(m for m in raw_messages if isinstance(m, Mapping))
+        if isinstance(raw_messages, list)
+        else ()
+    )
 
     raw_tools = decoded.get("tools")
-    tools = tuple(_tool_spec(entry) for entry in raw_tools if isinstance(entry, Mapping)) if isinstance(raw_tools, list) else ()
+    tools = (
+        tuple(_tool_spec(entry) for entry in raw_tools if isinstance(entry, Mapping))
+        if isinstance(raw_tools, list)
+        else ()
+    )
 
     return ChatRequest(
         model=_as_str(decoded.get("model")),
@@ -351,7 +359,9 @@ def parse_chat_response(body: bytes) -> ChatResponse:
         message = choice.get("message")
         if not isinstance(message, Mapping):
             continue
-        intents.extend(_intents_from_tool_calls(message.get("tool_calls"), choice_index=choice_index))
+        intents.extend(
+            _intents_from_tool_calls(message.get("tool_calls"), choice_index=choice_index)
+        )
         if isinstance(message.get("content"), str):
             content_parts.append(message["content"])
 
@@ -464,7 +474,9 @@ class StreamAccumulator:
         if len(self._carry) > MAX_SSE_CARRY:
             # No frame boundary in a megabyte: this is not an SSE stream we can
             # follow. Drop the buffer rather than grow it without bound.
-            self._errors.append(f"no SSE frame boundary within {MAX_SSE_CARRY} bytes; observation dropped")
+            self._errors.append(
+                f"no SSE frame boundary within {MAX_SSE_CARRY} bytes; observation dropped"
+            )
             self._carry = b""
             return
         frames, self._carry = parse_sse_frames(self._carry)
@@ -530,7 +542,9 @@ class StreamAccumulator:
             if isinstance(call, Mapping):
                 self._handle_tool_call_delta(call, choice_index, tool_position)
 
-    def _handle_tool_call_delta(self, call: Mapping[str, Any], choice_index: int, position: int) -> None:
+    def _handle_tool_call_delta(
+        self, call: Mapping[str, Any], choice_index: int, position: int
+    ) -> None:
         """Merge one ``delta.tool_calls[]`` fragment into its slot."""
         raw_index = call.get("index")
         index = raw_index if isinstance(raw_index, int) else position
@@ -602,7 +616,9 @@ class ResponseObserver:
         self._json_limit = json_buffer_limit
         self._buffer = bytearray()
         self._overflowed = False
-        self._accumulator = StreamAccumulator(content_sample_limit=content_sample_limit) if self.is_stream else None
+        self._accumulator = (
+            StreamAccumulator(content_sample_limit=content_sample_limit) if self.is_stream else None
+        )
         self._observed = 0
 
     @property
@@ -632,7 +648,9 @@ class ResponseObserver:
             self._accumulator.close()
             return self._accumulator.result(content_type=self.content_type)
         if self._overflowed:
-            return ChatResponse(validation_error=f"response body exceeded {self._json_limit} bytes; not parsed")
+            return ChatResponse(
+                validation_error=f"response body exceeded {self._json_limit} bytes; not parsed"
+            )
         if not self._buffer:
             return None
         return parse_chat_response(bytes(self._buffer))

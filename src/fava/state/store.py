@@ -24,11 +24,10 @@ import contextlib
 import logging
 from typing import Final
 
-from llm_proxy.hooks import RequestContext, ResponseContext
-
 from fava.state.events import EventKind, EventLog, derive_run_id, task_text
 from fava.state.graph import PermissionGraph, Violation, lower, validate
 from fava.state.ir import IRExtractor, NullIRExtractor, PermissionIR
+from llm_proxy.hooks import RequestContext, ResponseContext
 
 logger = logging.getLogger(__name__)
 
@@ -282,14 +281,18 @@ class RecordStore:
         self._extractions.add(task)
         task.add_done_callback(self._extractions.discard)
 
-    async def _extract(self, run: RunState, text: str, model: str | None, authorization: str | None) -> None:
+    async def _extract(
+        self, run: RunState, text: str, model: str | None, authorization: str | None
+    ) -> None:
         """Run the extractor and record its result. Never raises."""
         try:
             ir = await self.extractor.extract(text, model=model, authorization=authorization)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - an observer must not be able to fail
-            logger.warning("IR extraction raised for run %s: %s: %s", run.run_id[:8], type(exc).__name__, exc)
+            logger.warning(
+                "IR extraction raised for run %s: %s: %s", run.run_id[:8], type(exc).__name__, exc
+            )
             ir = PermissionIR.unknown(f"{type(exc).__name__}: {exc}")
         run.set_ir(ir)
 

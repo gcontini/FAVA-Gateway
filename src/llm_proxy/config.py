@@ -79,7 +79,9 @@ class ProxySettings:
         if not self.upstream_url:
             raise ValueError("upstream_url is required")
         if not self.upstream_url.startswith(("http://", "https://")):
-            raise ValueError(f"upstream_url must be an absolute HTTP(S) URL, got {self.upstream_url!r}")
+            raise ValueError(
+                f"upstream_url must be an absolute HTTP(S) URL, got {self.upstream_url!r}"
+            )
         if self.max_body_size <= 0:
             raise ValueError("max_body_size must be positive")
         if self.timeout <= 0 or self.stream_read_timeout <= 0:
@@ -113,7 +115,9 @@ class ProxySettings:
             host=env.get(ENV_HOST, "127.0.0.1"),
             port=_env_int(env, ENV_PORT, DEFAULT_PORT),
             timeout=_env_float(env, ENV_TIMEOUT, DEFAULT_TIMEOUT),
-            stream_read_timeout=_env_float(env, ENV_STREAM_READ_TIMEOUT, DEFAULT_STREAM_READ_TIMEOUT),
+            stream_read_timeout=_env_float(
+                env, ENV_STREAM_READ_TIMEOUT, DEFAULT_STREAM_READ_TIMEOUT
+            ),
             max_body_size=_env_int(env, ENV_MAX_BODY, DEFAULT_MAX_BODY_SIZE),
         )
 

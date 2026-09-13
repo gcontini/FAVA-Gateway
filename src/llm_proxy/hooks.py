@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, TypeAlias, runtime_checkable
 
 from llm_proxy.chat import ChatRequest, ChatResponse, ToolIntent, ToolResult, ToolSpec
@@ -65,7 +65,9 @@ class RequestContext:
     @property
     def is_chat_completion(self) -> bool:
         """Whether this request is a completion call rather than a side endpoint."""
-        return self.chat is not None and self.upstream_suffix.rstrip("/").endswith("/chat/completions")
+        return self.chat is not None and self.upstream_suffix.rstrip("/").endswith(
+            "/chat/completions"
+        )
 
     @property
     def model(self) -> str | None:
@@ -253,7 +255,9 @@ class LoggingHooks:
     async def on_response(self, context: ResponseContext) -> None:
         """Log the status and, crucially, the tool calls the model asked for."""
         intents = context.tool_intents
-        summary = ",".join(f"{intent.name}({len(intent.arguments_json)}B)" for intent in intents) or "-"
+        summary = (
+            ",".join(f"{intent.name}({len(intent.arguments_json)}B)" for intent in intents) or "-"
+        )
         self._log.log(
             self._level,
             "<- %d model=%s intents=%d [%s] finish=%s unknown=%s bytes=%d",
@@ -333,7 +337,9 @@ async def call_swallowing(func: Callable[..., Awaitable[Any]] | None, *args: Any
     try:
         return await func(*args)
     except Exception:  # noqa: BLE001 - deliberate: hooks are best-effort observers
-        logger.exception("Proxy hook %s raised; continuing relay", getattr(func, "__qualname__", func))
+        logger.exception(
+            "Proxy hook %s raised; continuing relay", getattr(func, "__qualname__", func)
+        )
         return None
 
 

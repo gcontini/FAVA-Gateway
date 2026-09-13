@@ -47,4 +47,4 @@ target-version = "py310"
 select = ["E", "F", "W", "I", "UP"]
 
 [tool.ruff.format]
-indent-size = 4
+indent-style = "space"

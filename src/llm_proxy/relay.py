@@ -173,7 +173,8 @@ class ForwardingProxy:
             await _send_api_error(
                 send,
                 404,
-                message=f"No API endpoint at {path}; this proxy serves {self.settings.mount_prefix!r}",
+                message=f"No API endpoint at {path}; this proxy serves "
+                f"{self.settings.mount_prefix!r}",
                 error_type="invalid_request_error",
                 code="unknown_path",
             )
@@ -259,7 +260,9 @@ class ForwardingProxy:
         state = _ResponseState()
         try:
             async with anyio.create_task_group() as task_group:
-                task_group.start_soon(self._watch_disconnect, context, receive, task_group.cancel_scope)
+                task_group.start_soon(
+                    self._watch_disconnect, context, receive, task_group.cancel_scope
+                )
                 try:
                     await self._relay_stream(client, context, body, send, state)
                 finally:
@@ -330,7 +333,9 @@ class ForwardingProxy:
             state.client_gone = True
             raise
         except Exception as exc:  # mid-stream transport error
-            logger.warning("Relay failed mid-response for %s %s: %s", context.http_method, context.path, exc)
+            logger.warning(
+                "Relay failed mid-response for %s %s: %s", context.http_method, context.path, exc
+            )
             state.error = exc
         finally:
             # Shielded: the response must be closed and the exchange ended even
@@ -342,7 +347,9 @@ class ForwardingProxy:
                 if not state.started and state.error is not None:
                     await self._fail(context, send, state, state.error, status_code=502)
 
-    def _response_context(self, context: RequestContext, state: _ResponseState) -> ResponseContext | None:
+    def _response_context(
+        self, context: RequestContext, state: _ResponseState
+    ) -> ResponseContext | None:
         """Build the :class:`ResponseContext` hooks receive, or None if no response."""
         upstream = state.upstream
         if upstream is None:

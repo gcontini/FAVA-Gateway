@@ -181,7 +181,9 @@ class PermissionGraph:
         excluded — ancestry is not a flow.
         """
         return tuple(
-            edge.src for edge in self.edges if edge.dst == node_id and edge.type is not EdgeType.PARENT
+            edge.src
+            for edge in self.edges
+            if edge.dst == node_id and edge.type is not EdgeType.PARENT
         )
 
 
@@ -209,12 +211,36 @@ class CapabilityRule:
 # for free, and is meant to be replaced by a real policy module — keep it one
 # table and one function so that swap stays cheap.
 CAPABILITY_RULES: Final = (
-    CapabilityRule(("shell", "bash", "exec", "command", "terminal", "subprocess"), "proc:exec", ("command", "cmd", "script")),
-    CapabilityRule(("send", "post", "publish", "email", "slack", "upload", "webhook", "notify"), "net:send", ("url", "endpoint", "channel", "to", "recipient", "host")),
-    CapabilityRule(("fetch", "http", "curl", "request", "browse", "download"), "net:fetch", ("url", "endpoint", "host")),
-    CapabilityRule(("delete", "remove", "rm", "drop", "truncate"), "file:delete", ("path", "file", "file_path", "filename", "target")),
-    CapabilityRule(("write", "edit", "create", "append", "save", "patch"), "file:write", ("path", "file", "file_path", "filename", "target")),
-    CapabilityRule(("read", "cat", "open", "view", "load", "get", "list"), "file:read", ("path", "file", "file_path", "filename", "target")),
+    CapabilityRule(
+        ("shell", "bash", "exec", "command", "terminal", "subprocess"),
+        "proc:exec",
+        ("command", "cmd", "script"),
+    ),
+    CapabilityRule(
+        ("send", "post", "publish", "email", "slack", "upload", "webhook", "notify"),
+        "net:send",
+        ("url", "endpoint", "channel", "to", "recipient", "host"),
+    ),
+    CapabilityRule(
+        ("fetch", "http", "curl", "request", "browse", "download"),
+        "net:fetch",
+        ("url", "endpoint", "host"),
+    ),
+    CapabilityRule(
+        ("delete", "remove", "rm", "drop", "truncate"),
+        "file:delete",
+        ("path", "file", "file_path", "filename", "target"),
+    ),
+    CapabilityRule(
+        ("write", "edit", "create", "append", "save", "patch"),
+        "file:write",
+        ("path", "file", "file_path", "filename", "target"),
+    ),
+    CapabilityRule(
+        ("read", "cat", "open", "view", "load", "get", "list"),
+        "file:read",
+        ("path", "file", "file_path", "filename", "target"),
+    ),
 )
 
 _WORD_SPLIT: Final = re.compile(r"[^a-z0-9]+")
@@ -390,7 +416,9 @@ def lower(log: EventLog, ir: PermissionIR) -> PermissionGraph:
             if parent is not None:
                 # The result descends from the call that produced it — the
                 # correlation that spans two HTTP exchanges.
-                edges.append(Edge(node.id, parent.id, EdgeType.PARENT, event.event_id, Trust.OBSERVED))
+                edges.append(
+                    Edge(node.id, parent.id, EdgeType.PARENT, event.event_id, Trust.OBSERVED)
+                )
 
     # Argument text per intent, computed once: every flow pass searches it.
     haystacks = {event.event_id: _haystack(event.payload) for event, _ in intents}
@@ -406,14 +434,22 @@ def lower(log: EventLog, ir: PermissionIR) -> PermissionGraph:
                 continue
             if _flows_into(content, haystacks[intent_event.event_id]):
                 edges.append(
-                    Edge(result_node.id, tool_node.id, EdgeType.DATA, intent_event.event_id, Trust.OBSERVED)
+                    Edge(
+                        result_node.id,
+                        tool_node.id,
+                        EdgeType.DATA,
+                        intent_event.event_id,
+                        Trust.OBSERVED,
+                    )
                 )
 
     # Policy flow: a requested capability that reaches a sink the task named.
     for _, tool_node in intents:
         for target, sink_id in sink_ids.items():
             if any(matches_sink(capability, target) for capability in tool_node.requests):
-                edges.append(Edge(tool_node.id, sink_id, EdgeType.DATA, POLICY_CAPABILITY_SINK, Trust.POLICY))
+                edges.append(
+                    Edge(tool_node.id, sink_id, EdgeType.DATA, POLICY_CAPABILITY_SINK, Trust.POLICY)
+                )
 
     # Inferred flow: an asset the task named appearing in a call's arguments.
     for name, asset_id in asset_ids.items():
@@ -431,7 +467,9 @@ def lower(log: EventLog, ir: PermissionIR) -> PermissionGraph:
             continue
         for _, tool_node in intents:
             if _guards(obligation.before, tool_node.op):
-                edges.append(Edge(guard_id, tool_node.id, EdgeType.CONTROL, POLICY_OBLIGATION, Trust.POLICY))
+                edges.append(
+                    Edge(guard_id, tool_node.id, EdgeType.CONTROL, POLICY_OBLIGATION, Trust.POLICY)
+                )
 
     evidence_ids = frozenset({event.event_id for event in events} | POLICY_RULES | {root})
     return PermissionGraph(
@@ -593,34 +631,58 @@ def validate(graph: PermissionGraph) -> list[Violation]:
     times: dict[str, int] = {}
     for node in graph.nodes:
         if node.id in seen:
-            violations.append(Violation("duplicate-node", f"node id {node.id!r} appears more than once", node.id))
+            violations.append(
+                Violation("duplicate-node", f"node id {node.id!r} appears more than once", node.id)
+            )
         seen.add(node.id)
         times[node.id] = node.time
         if not isinstance(node.kind, NodeKind):
-            violations.append(Violation("bad-node-kind", f"node {node.id!r} has kind {node.kind!r}", node.id))
+            violations.append(
+                Violation("bad-node-kind", f"node {node.id!r} has kind {node.kind!r}", node.id)
+            )
         for label in node.labels:
             if label.evidence is None:
                 violations.append(
-                    Violation("ungrounded-label", f"label {label.name!r} on {node.id!r} cites no evidence", node.id)
+                    Violation(
+                        "ungrounded-label",
+                        f"label {label.name!r} on {node.id!r} cites no evidence",
+                        node.id,
+                    )
                 )
 
     for edge in graph.edges:
         subject = f"{edge.src}->{edge.dst}"
         if edge.src not in seen:
-            violations.append(Violation("dangling-edge", f"edge source {edge.src!r} is not a node", subject))
+            violations.append(
+                Violation("dangling-edge", f"edge source {edge.src!r} is not a node", subject)
+            )
         if edge.dst not in seen:
-            violations.append(Violation("dangling-edge", f"edge target {edge.dst!r} is not a node", subject))
+            violations.append(
+                Violation("dangling-edge", f"edge target {edge.dst!r} is not a node", subject)
+            )
         if edge.src == edge.dst:
-            violations.append(Violation("self-edge", f"node {edge.src!r} depends on itself", subject))
+            violations.append(
+                Violation("self-edge", f"node {edge.src!r} depends on itself", subject)
+            )
         if not isinstance(edge.type, EdgeType):
-            violations.append(Violation("bad-edge-type", f"edge {subject} has type {edge.type!r}", subject))
+            violations.append(
+                Violation("bad-edge-type", f"edge {subject} has type {edge.type!r}", subject)
+            )
         if not isinstance(edge.trust, Trust):
-            violations.append(Violation("bad-edge-trust", f"edge {subject} has trust {edge.trust!r}", subject))
+            violations.append(
+                Violation("bad-edge-trust", f"edge {subject} has trust {edge.trust!r}", subject)
+            )
         if not edge.evidence:
-            violations.append(Violation("unevidenced-edge", f"edge {subject} cites no evidence", subject))
+            violations.append(
+                Violation("unevidenced-edge", f"edge {subject} cites no evidence", subject)
+            )
         elif edge.evidence not in graph.evidence_ids:
             violations.append(
-                Violation("unknown-evidence", f"edge {subject} cites unknown evidence {edge.evidence!r}", subject)
+                Violation(
+                    "unknown-evidence",
+                    f"edge {subject} cites unknown evidence {edge.evidence!r}",
+                    subject,
+                )
             )
         if (
             edge.type is EdgeType.PARENT
@@ -629,7 +691,11 @@ def validate(graph: PermissionGraph) -> list[Violation]:
             and times[edge.src] < times[edge.dst]
         ):
             violations.append(
-                Violation("non-monotonic-parent", f"{edge.src!r} precedes its parent {edge.dst!r}", subject)
+                Violation(
+                    "non-monotonic-parent",
+                    f"{edge.src!r} precedes its parent {edge.dst!r}",
+                    subject,
+                )
             )
 
     return violations

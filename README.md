@@ -1,5 +1,9 @@
 # FAVA — permission graphs from LLM API traffic
 
+[![arXiv](https://img.shields.io/badge/arXiv-2607.27267-b31b1b.svg)](https://arxiv.org/abs/2607.27267)
+[![Python](https://img.shields.io/badge/python-≥3.10-3776ab.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A **reverse proxy for the OpenAI-compatible Chat Completions API**. It sits
 between an agent harness and the LLM provider, relays traffic
 **byte-for-byte**, and builds an evidence-backed **permission graph** out of

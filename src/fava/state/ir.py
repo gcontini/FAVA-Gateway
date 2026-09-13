@@ -379,7 +379,9 @@ class LlmIRExtractor:
 
     async def _call(self, task_text: str) -> str:
         """Run one completion and return the assistant's text."""
-        transport_client = httpx.AsyncClient(transport=self._transport) if self._transport is not None else None
+        transport_client = (
+            httpx.AsyncClient(transport=self._transport) if self._transport is not None else None
+        )
         async with AsyncOpenAI(
             base_url=self.settings.base_url,
             api_key=self.settings.api_key,
@@ -436,12 +438,20 @@ def parse_ir(content: str) -> PermissionIR:
             if _text(e.get("op"))
         ),
         obligations=tuple(
-            Obligation(requires=_text(e.get("requires")), before=_text(e.get("before")), evidence=_evidence(e))
+            Obligation(
+                requires=_text(e.get("requires")),
+                before=_text(e.get("before")),
+                evidence=_evidence(e),
+            )
             for e in _entries(decoded.get("obligations"))
             if _text(e.get("requires"))
         ),
         sinks=tuple(
-            Sink(target=_text(e.get("target")), labels=_labels(e.get("labels")), evidence=_evidence(e))
+            Sink(
+                target=_text(e.get("target")),
+                labels=_labels(e.get("labels")),
+                evidence=_evidence(e),
+            )
             for e in _entries(decoded.get("sinks"))
             if _text(e.get("target"))
         ),

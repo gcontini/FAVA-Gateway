@@ -19,9 +19,8 @@ from __future__ import annotations
 
 import logging
 
-from llm_proxy.hooks import RequestContext, ResponseContext
-
 from fava.state.store import RecordStore
+from llm_proxy.hooks import RequestContext, ResponseContext
 
 logger = logging.getLogger(__name__)
 

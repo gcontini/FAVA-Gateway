@@ -124,7 +124,9 @@ def forward_request_headers(
             continue
         if name == "authorization" and not forward_client_auth:
             continue
-        if not trust_client_headers and not is_api_wire_header(name, forward_client_auth=forward_client_auth):
+        if not trust_client_headers and not is_api_wire_header(
+            name, forward_client_auth=forward_client_auth
+        ):
             continue
         result[name] = value
 
