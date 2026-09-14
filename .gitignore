@@ -9,5 +9,5 @@ build/
 .env
 uv.lock
 .env.bak
-uv.lock
-uv.lock
+.vscode
+

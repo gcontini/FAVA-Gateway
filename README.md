@@ -1,4 +1,4 @@
-# FAVA — permission graphs from LLM API traffic
+# FAVA — permission gateway for LLM API traffic
 
 [![arXiv](https://img.shields.io/badge/arXiv-2607.27267-b31b1b.svg)](https://arxiv.org/abs/2607.27267)
 [![Python](https://img.shields.io/badge/python-≥3.10-3776ab.svg)](https://www.python.org/downloads/)
@@ -39,32 +39,37 @@ architecture rationale and roadmap, and
 [`docs/reference.md`](docs/reference.md) for the full configuration and hooks
 API.
 
-## Install
+## Quickstart
 
-Requires Python ≥ 3.10 and [`uv`](https://docs.astral.sh/uv/).
+**Prerequisites:** Python ≥ 3.10 and [`uv`](https://docs.astral.sh/uv/).
 
+**1. Install:**
 ```bash
-uv sync --group dev     # creates .venv/, installs fava editable
+uv sync --group dev
 ```
 
-## Run
+**2. Set up `.env`:**
+Copy `.env.example` to `.env` and fill up the required values. `.env` is git ignored, anyways pay attention not to commit it by mistake.
 
 ```bash
-uv run fava-llm-proxy --upstream-url https://api.openai.com/v1 --port 8900
+cp .env.example .env
+# Edit .env with LLM provider's credentials (for request analysis)
 ```
 
-Point the harness at `http://127.0.0.1:8900/v1` as its OpenAI base URL — that
-swap is the whole integration:
+**3. Run the proxy:**
+```bash
+uv run fava-llm-proxy
+```
+
+**4. Point your harness at the proxy:**
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:8900/v1", api_key="sk-…")
+client = OpenAI(base_url="http://127.0.0.1:8900", api_key="sk-…")
 ```
 
-Every setting can also come from the environment, and the proxy can hold the
-provider credential instead of the agent — see
-[`docs/reference.md`](docs/reference.md) for the full flag and environment
-variable list.
+For the full list of environment variables and command-line flags, see
+[`docs/reference.md`](docs/reference.md).
 
 ## Building the permission graph
 
@@ -125,19 +130,16 @@ uv run pytest                       # 151 tests, real HTTP wire both hops
 uv run pytest tests/test_units.py   # no servers needed, ~0.2s
 ```
 
-## Manual test against a real provider
+## Integration test
 
-Two scripts split the two sides of a real exchange — neither runs under
-pytest, since this costs a real API call and needs live credentials:
+Run both directions of a real exchange without pytest (costs a real API call):
 
 ```bash
-cp .env.example .env
-# edit .env: MODEL_BASE_URL and MODEL_API_KEY for your provider
+# Terminal 1
+uv run python scripts/start_proxy.py
 
-uv run python scripts/start_proxy.py    # terminal 1 — blocks, Ctrl+C to stop
-uv run python scripts/call_model.py     # terminal 2 — makes one call, exits
+# Terminal 2
+uv run python scripts/call_model.py
 ```
 
-`start_proxy.py` only needs the upstream URL — it relays whatever credential
-the client sends. `call_model.py` holds the real API key and points at the
-proxy's own URL. See the scripts' docstrings for detail.
+Both read from `.env`. See the scripts' docstrings for details.

@@ -9,14 +9,12 @@ dependencies = [
     "starlette>=1.6",
     "uvicorn>=0.52",
     "anyio>=4.15",
-    # `fava.state.ir.LlmIRExtractor` talks to its own, separately configured
-    # extraction model through this — never through the proxied upstream.
     "openai>=1.60",
 ]
 
 [project.scripts]
 # `uv run fava-llm-proxy --upstream-url https://api.openai.com/v1`
-fava-llm-proxy = "llm_proxy.cli:main"
+fava-llm-proxy = "main:main"
 
 [dependency-groups]
 dev = [
@@ -32,8 +30,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 # The distribution `fava` ships two packages from src/: `llm_proxy` is the
 # transport, `fava` is everything that reasons about what it relayed. The
-# dependency arrow only ever points `fava` -> `llm_proxy`.
+# dependency arrow only ever points `fava` -> `llm_proxy`. `main.py` is the
+# top-level entrypoint that wires the two together.
 packages = ["src/llm_proxy", "src/fava"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/main.py" = "main.py"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

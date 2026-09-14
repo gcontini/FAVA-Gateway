@@ -1,4 +1,4 @@
-"""Command-line entrypoint for the forwarding LLM API proxy.
+"""Process entrypoint for the forwarding LLM API proxy.
 
 Usage::
 
@@ -10,6 +10,12 @@ Or entirely from the environment (``ProxySettings.from_env``)::
 
 The agent harness is then pointed at ``http://127.0.0.1:8900/v1`` as its
 OpenAI base URL — that swap is the whole integration.
+
+:func:`build_app` is the builder: it turns parsed CLI arguments into a runnable
+ASGI app. :func:`main` drives it and is the one place `llm_proxy` (the
+transport) and `fava.state` (the component that reasons about what it relayed)
+are wired together, attaching :class:`~fava.state.StateHooks` before handing
+the app to uvicorn.
 """
 
 from __future__ import annotations
@@ -21,7 +27,9 @@ import sys
 from collections.abc import Mapping, Sequence
 
 import uvicorn
+from starlette.types import ASGIApp
 
+from fava.state import RecordStore, StateHooks
 from llm_proxy.app import create_proxy_app
 from llm_proxy.config import (
     DEFAULT_MAX_BODY_SIZE,
@@ -39,7 +47,7 @@ from llm_proxy.config import (
     ProxySettings,
     normalize_mount_prefix,
 )
-from llm_proxy.hooks import LoggingHooks
+from llm_proxy.hooks import HooksLike
 
 _LOG_LEVELS = ("critical", "error", "warning", "info", "debug")
 
@@ -227,8 +235,33 @@ def _resolve(arg_value: object, env_value: str | None, default: object) -> objec
     return default
 
 
+def build_app(
+    args: argparse.Namespace, *, extra_hooks: HooksLike = None
+) -> tuple[ASGIApp, ProxySettings]:
+    """Build the proxy's settings and ASGI app from parsed CLI arguments.
+
+    Args:
+        args: Parsed CLI namespace, e.g. from ``build_parser().parse_args()``.
+        extra_hooks: Hooks to attach in addition to ``--access-log``'s
+            :class:`~llm_proxy.hooks.LoggingHooks`. This is the seam
+            :func:`main` attaches FAVA's state layer through.
+
+    Returns:
+        The ASGI app and the settings it was built from — callers typically
+        need the latter's ``host``/``port`` to run the app.
+    """
+    settings = settings_from_args(args)
+    app = create_proxy_app(
+        settings,
+        hooks=extra_hooks,
+        access_log=args.access_log,
+        allow_origins=args.allow_origin,
+    )
+    return app, settings
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """Parse arguments, build the app and run it under uvicorn.
+    """Parse arguments, build the app with FAVA's state hooks attached, and run it.
 
     Returns:
         The process exit code (0 on a clean shutdown).
@@ -240,13 +273,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         stream=sys.stderr,
     )
 
-    settings = settings_from_args(args)
-    app = create_proxy_app(
-        settings,
-        hooks=[LoggingHooks()] if args.access_log else None,
-        access_log=False,
-        allow_origins=args.allow_origin,
-    )
+    store = RecordStore()
+    app, settings = build_app(args, extra_hooks=StateHooks(store))
 
     logger = logging.getLogger(__name__)
     logger.info("Point your agent harness at base_url=%s", settings.base_url_for_clients)

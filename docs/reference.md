@@ -78,7 +78,6 @@ curl http://127.0.0.1:8900/healthz
 | `llm_proxy.config` | `ProxySettings` — immutable, validated configuration |
 | `llm_proxy.relay` | `ForwardingProxy` — the ASGI app; the only code touching the wire |
 | `llm_proxy.app` | `create_proxy_app()` — deployment entry point (settings + hooks + CORS) |
-| `llm_proxy.cli` | `fava-llm-proxy` console script |
 | `llm_proxy.chat` | Read-only parsed views of Chat Completions traffic |
 | `llm_proxy.headers` | Hop-by-hop and API wire header relay rules |
 | `llm_proxy.hooks` | `ProxyHooks`, `RequestContext`, `ResponseContext` — the interception seam |
@@ -93,6 +92,10 @@ relayed. The dependency arrow only ever points `fava` → `llm_proxy`.
 | `fava.state.graph` | `PermissionGraph`, `lower()`, `validate()`, capability normalization |
 | `fava.state.store` | `RecordStore`, `RunState` — per-run state and the lowered graph |
 | `fava.state.hooks` | `StateHooks` — the `ProxyHooks` that feeds the store |
+
+`main` sits above both: it parses CLI arguments, builds the proxy app via
+`build_app()`, attaches `fava.state.StateHooks`, and is the `fava-llm-proxy`
+console script's entry point.
 
 ## As an ASGI app
 
